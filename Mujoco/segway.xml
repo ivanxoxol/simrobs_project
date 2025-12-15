@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="utf-8"?>
+<mujoco model="segway_from_scratch">
+
+  <compiler angle="degree"/>
+  <option timestep="0.001" integrator="RK4" gravity="0 0 -9.81"/>
+
+  <default>
+    <geom solref="0.02 2" solimp="0.9 0.95 0.001 0.5 2" margin="0.001"/>
+    <joint damping="0.01"/>
+  </default>
+
+  <worldbody>
+    <light name="sun" pos="0 0 3" dir="0 0 -1" directional="true"/>
+
+    <geom name="floor" type="plane" size="20 20 0.1"
+          rgba="0.85 0.9 0.85 1"
+          friction="1.2 0.01 0.0002"/>
+
+    <body name="chassis" pos="0 0 0.045">
+      <joint name="chassis_x" type="slide" axis="1 0 0" damping="0.02"/>
+
+      <geom name="chassis_geom" type="box"
+            size="0.06 0.08 0.015"
+            pos="0 0 0.02"
+            rgba="0.15 0.15 0.15 1"/>
+      <inertial pos="0 0 0.02" mass="0.35" diaginertia="0.0012 0.0016 0.0010"/>
+
+      <body name="left_wheel" pos="0 0.075 0">
+        <joint name="left_wheel_hinge" type="hinge" axis="0 1 0" damping="0.002"/>
+        <geom name="left_wheel_geom" type="cylinder"
+              size="0.045 0.012"
+              euler="90 0 0"
+              rgba="0.25 0.25 0.25 1"
+              friction="1.2 0.01 0.0002"/>
+        <inertial pos="0 0 0" mass="0.20" diaginertia="0.00018 0.00010 0.00010"/>
+      </body>
+
+      <body name="right_wheel" pos="0 -0.075 0">
+        <joint name="right_wheel_hinge" type="hinge" axis="0 1 0" damping="0.002"/>
+        <geom name="right_wheel_geom" type="cylinder"
+              size="0.045 0.012"
+              euler="90 0 0"
+              rgba="0.25 0.25 0.25 1"
+              friction="1.2 0.01 0.0002"/>
+        <inertial pos="0 0 0" mass="0.20" diaginertia="0.00018 0.00010 0.00010"/>
+      </body>
+
+      <body name="torso" pos="0 0 0.02">
+        <joint name="torso_pitch" type="hinge" axis="0 1 0" damping="0.01"/>
+
+        <geom name="torso_geom" type="box"
+              size="0.03 0.05 0.18"
+              pos="0 0 0.18"
+              rgba="0.2 0.6 1 1"/>
+        <inertial pos="0 0 0.18" mass="0.9" diaginertia="0.006 0.006 0.0015"/>
+
+        <site name="imu" pos="0 0 0.18" size="0.006"/>
+      </body>
+
+    </body>
+  </worldbody>
+
+  <actuator>
+    <motor name="left_motor"  joint="left_wheel_hinge"  gear="1" ctrllimited="true" ctrlrange="-2.5 2.5"/>
+    <motor name="right_motor" joint="right_wheel_hinge" gear="1" ctrllimited="true" ctrlrange="-2.5 2.5"/>
+  </actuator>
+
+  <sensor>
+    <gyro name="gyro" site="imu"/>
+    <accelerometer name="acc" site="imu"/>
+  </sensor>
+
+</mujoco>

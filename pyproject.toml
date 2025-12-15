@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "simrobs_project"
+version = "0.1.0"
+description = "MuJoCo-based simulation scripts for a balancing/biped robot"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.26",
+  "scipy>=1.10",
+  "mujoco>=3.2.0",
+  "mujoco-python-viewer>=0.1.1",
+  "matplotlib>=3.8",
+]
+
+
+[tool.setuptools]
+packages = []
+include-package-data = false
