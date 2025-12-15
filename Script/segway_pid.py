@@ -14,31 +14,33 @@ import mujoco_viewer
 XML_NAME = "segway.xml"
 INIT_PITCH_DEG = 8.0
 
-# ===== PID по УГЛУ (theta) =====
+# ===== ВНЕШНИЙ КОНТУР: PID по X -> theta_ref (рад) =====
+KP_X = 1.2
+KI_X = 0.25
+KD_X = 2.0
+X_I_LIMIT = 3.0
+THETA_REF_LIMIT = 0.35  # рад ~ 20 deg
+
+# ===== ВНУТРЕННИЙ КОНТУР: PID по THETA (theta - theta_ref) -> motor torque =====
 KP_THETA = 85.0
 KI_THETA = 35.0
 KD_THETA = 12.0
-I_LIMIT = 2.0          # ограничение интегратора (рад*с)
+THETA_I_LIMIT = 2.0
 
-# ===== PD по ПОЛОЖЕНИЮ тележки (чтобы не уезжал) =====
-K_X = 0.8
-K_XD = 1.8
-
-# Ограничение по моменту (должно соответствовать ctrlrange в XML)
+# Ограничение по моменту
 U_MAX = 2.5
 
 # Фильтры
-RATE_TAU = 0.015       # фильтр thetad (с)
-U_TAU = 0.010          # сглаживание u (с)
+RATE_TAU = 0.015
+U_TAU = 0.010
 
-# Знаки (на случай инверсий)
+# Знаки
 ANGLE_SIGN = 1.0
 MOTOR_SIGN = 1.0
 AUTO_MOTOR_CALIBRATE = True
 
 
 def project_root_from_script() -> str:
-    """Script/segway_pid.py -> project root"""
     here = os.path.dirname(os.path.abspath(__file__))  # .../simrobs_project/Script
     return os.path.normpath(os.path.join(here, ".."))  # .../simrobs_project
 
@@ -74,13 +76,11 @@ def set_initial_pose(model: mujoco.MjModel, data: mujoco.MjData, pitch_deg: floa
     data.qvel[:] = 0.0
 
     th = math.radians(pitch_deg)
-
     jx = jid(model, "chassis_x")
     jp = jid(model, "torso_pitch")
 
     data.qpos[model.jnt_qposadr[jx]] = 0.0
     data.qpos[model.jnt_qposadr[jp]] = th
-
     mujoco.mj_forward(model, data)
 
 
@@ -100,37 +100,47 @@ def get_state(model: mujoco.MjModel, data: mujoco.MjData):
 def save_csv(csv_path: str, rows: list[list[float]]) -> None:
     with open(csv_path, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["time", "x", "xd", "theta", "thetad", "theta_f", "integ_theta", "u_cmd", "u_sat", "u_applied"])
+        w.writerow([
+            "time",
+            "x", "xd",
+            "theta", "thetad", "thetad_f",
+            "theta_ref",
+            "x_int", "theta_int",
+            "u_cmd", "u_f", "u_sat", "u_applied",
+            "sat"
+        ])
         w.writerows(rows)
 
 
 def save_plot(png_path: str, rows: list[list[float]]) -> None:
-    # rows: time, x, xd, theta, thetad, theta_f, integ, u_cmd, u_sat, u_applied
     import matplotlib.pyplot as plt
 
     arr = np.array(rows, dtype=float)
     t = arr[:, 0]
     x = arr[:, 1]
     theta = arr[:, 3]
-    u = arr[:, 9]
+    u = arr[:, 12]  # u_applied
 
     fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
 
-    ax1.plot(t, theta)
+    ax1.plot(t, theta, label="theta")
     ax1.axhline(0.0, linewidth=0.8)
     ax1.set_ylabel("theta (rad)")
     ax1.grid(True, alpha=0.3)
+    ax1.legend()
 
-    ax2.plot(t, x)
+    ax2.plot(t, x, label="x")
     ax2.axhline(0.0, linewidth=0.8)
     ax2.set_ylabel("x (m)")
     ax2.grid(True, alpha=0.3)
+    ax2.legend()
 
-    ax3.plot(t, u)
+    ax3.plot(t, u, label="u_applied")
     ax3.axhline(0.0, linewidth=0.8)
     ax3.set_ylabel("u_applied")
     ax3.set_xlabel("time (s)")
     ax3.grid(True, alpha=0.3)
+    ax3.legend()
 
     fig.suptitle("Segway: theta, x, control")
     fig.tight_layout()
@@ -158,14 +168,11 @@ def main():
     left_motor = aid(model, "left_motor")
     right_motor = aid(model, "right_motor")
 
-    # Стартовая поза
     set_initial_pose(model, data, INIT_PITCH_DEG)
 
-    # Устаканить контакт
     for _ in range(300):
         mujoco.mj_step(model, data)
 
-    # Автокалибровка направления моторов: какой знак уменьшает |theta|
     if AUTO_MOTOR_CALIBRATE:
         def trial(sign: float) -> float:
             set_initial_pose(model, data, INIT_PITCH_DEG)
@@ -188,7 +195,7 @@ def main():
 
             data.ctrl[left_motor] = 0.0
             data.ctrl[right_motor] = 0.0
-            return th1 - th0  # отрицательно = лучше
+            return th1 - th0
 
         d_pos = trial(+1.0)
         d_neg = trial(-1.0)
@@ -199,19 +206,18 @@ def main():
         for _ in range(200):
             mujoco.mj_step(model, data)
 
-    viewer = mujoco_viewer.MujocoViewer(model, data, title="Segway PID (theta) + PD (x)")
+    viewer = mujoco_viewer.MujocoViewer(model, data, title="Segway PID: x->theta_ref, theta->u")
     STEPS_PER_RENDER = 10
 
-    # Состояния PID
-    integ_theta = 0.0
+    x_int = 0.0
+    theta_int = 0.0
     thetad_f = 0.0
     u_f = 0.0
 
-    # Логи (децимация)
     rows: list[list[float]] = []
-    LOG_EVERY = 10  # логируем каждые N шагов
-
+    LOG_EVERY = 10
     step = 0
+
     try:
         while True:
             alive_attr = getattr(viewer, "is_alive")
@@ -222,39 +228,42 @@ def main():
             for _ in range(STEPS_PER_RENDER):
                 x, xd, theta, thetad = get_state(model, data)
 
-                # цель: theta_ref = 0, x_ref = 0
                 theta = ANGLE_SIGN * theta
                 thetad = ANGLE_SIGN * thetad
 
-                # фильтр D по углу
                 a_rate = dt / (RATE_TAU + dt)
                 thetad_f += a_rate * (thetad - thetad_f)
 
-                # ----- PID по углу -----
-                err_theta = theta
-                near_upright = abs(err_theta) < 0.35
+                # (1) PID по X -> theta_ref
+                x_err = x
+                if abs(theta) < 0.6:
+                    x_int += x_err * dt
+                    x_int = float(np.clip(x_int, -X_I_LIMIT, X_I_LIMIT))
+
+                theta_ref = -(KP_X * x_err + KI_X * x_int + KD_X * xd)
+                theta_ref = float(np.clip(theta_ref, -THETA_REF_LIMIT, THETA_REF_LIMIT))
+
+                # (2) PID по THETA -> u
+                theta_err = theta - theta_ref
+                near_upright = abs(theta_err) < 0.35 and abs(theta) < 0.7
 
                 if near_upright:
-                    integ_theta += err_theta * dt
-                    integ_theta = float(np.clip(integ_theta, -I_LIMIT, I_LIMIT))
+                    theta_int += theta_err * dt
+                    theta_int = float(np.clip(theta_int, -THETA_I_LIMIT, THETA_I_LIMIT))
 
-                u_pid = -(KP_THETA * err_theta + KI_THETA * integ_theta + KD_THETA * thetad_f)
+                u_cmd = -(KP_THETA * theta_err + KI_THETA * theta_int + KD_THETA * thetad_f)
 
-                # ----- PD по положению -----
-                u_pos = -(K_X * x + K_XD * xd)
-
-                u_cmd = u_pid + u_pos
-
-                # сгладим u
                 a_u = dt / (U_TAU + dt)
                 u_f += a_u * (u_cmd - u_f)
 
-                # saturation
                 u_sat = float(np.clip(u_f, -U_MAX, U_MAX))
+                sat = 1 if abs(u_sat - u_f) > 1e-9 else 0
 
-                # anti-windup: если в насыщении и интегратор толкает в ту же сторону
-                if abs(u_sat - u_f) > 1e-9 and np.sign(u_f) == np.sign(err_theta):
-                    integ_theta *= 0.995
+                if sat:
+                    if np.sign(u_f) == np.sign(theta_err):
+                        theta_int *= 0.995
+                    if np.sign(theta_ref) == np.sign(x_err):
+                        x_int *= 0.999
 
                 u_applied = MOTOR_SIGN * u_sat
                 data.ctrl[left_motor] = u_applied
@@ -266,15 +275,12 @@ def main():
                 if step % LOG_EVERY == 0:
                     rows.append([
                         float(data.time),
-                        float(x),
-                        float(xd),
-                        float(theta),
-                        float(thetad),
-                        float(thetad_f),
-                        float(integ_theta),
-                        float(u_cmd),
-                        float(u_sat),
-                        float(u_applied),
+                        float(x), float(xd),
+                        float(theta), float(thetad), float(thetad_f),
+                        float(theta_ref),
+                        float(x_int), float(theta_int),
+                        float(u_cmd), float(u_f), float(u_sat), float(u_applied),
+                        int(sat),
                     ])
 
                 if step % int(max(1, 0.2 / dt)) == 0:
@@ -285,7 +291,6 @@ def main():
     finally:
         viewer.close()
 
-    # Сохранение логов после закрытия окна
     if rows:
         save_csv(csv_path, rows)
         save_plot(png_path, rows)
