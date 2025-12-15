@@ -1,19 +1,101 @@
 # simrobs_project
 
-Two-wheel balancer and related MuJoCo experiments.
+Маленький проект с моделями и контроллерами для двухколёсного балансирующего робота (Segway) в MuJoCo 3.x. В репозитории есть две рабочие реализации: каскадный PID и LQR. Скрипты визуализируют симуляцию, пишут логи в CSV и сохраняют графики.
 
-Quick start (mod5, MuJoCo 3.x viewer):
-- Run `python Script/PID2.py` for complementary-filter PID (velocity actuators).
-- Or run `python Script/PID-LQR.py` to try the LQR/PID variant (fixed axes).
-- Recommended fresh controller: `python Script/segway_pid.py` — clean PID that
-  stabilizes the Segway (mod5) at pitch=0 using quaternion pitch + gyro rate.
+Чтобы быстро запустить:
+- `python Script/segway_pid.py` — каскадный PID (внешний контур по X → угол, внутренний по углу → момент).
+- `python Script/segway_lqr.py` — линейно-квадратичный регулятор, полученный численной линеаризацией около вертикали.
 
-Notes about fixes made:
-- Use portable paths to `Mujoco/mod5.xml` (not Windows backslashes).
-- Respect actuator control limits; if unlimited, fall back to sane velocity limits.
-- Compute pitch about the Y axis (matches wheel hinge axis in `mod5.xml`).
-- Initialize the freejoint quaternion to identity `[1, 0, 0, 0]`.
 
-Model files:
-- `Mujoco/mod5.xml` — recommended physics, velocity actuators (`left_motor`, `right_motor`).
-- `Mujoco/mod4.xml` — older torque-motor variant.
+**Структура Репозитория**
+- `Script/` — исполняемые скрипты контроллеров и вспомогательные файлы.
+  - `Script/segway_pid.py:1` — каскадный PID, логирование и построение графиков.
+  - `Script/segway_lqr.py:1` — LQR с численной линеаризацией дискретной системы.
+  - `Script/MUJOCO_LOG.TXT:1` — отладочный лог (не обязателен).
+- `Mujoco/` — модели MuJoCo.
+  - `Mujoco/segway.xml:1` — 2D-модель сегвея: тележка скользит по X, маятник вращается по тангажу (ось Y), два колеса на шарнирах, приводы — моментные моторы с ограничением.
+- `logs/` — автоматически создаётся, сюда сохраняются CSV и PNG с результатами прогонов.
+- `pyproject.toml:1` — зависимости проекта (NumPy, SciPy, MuJoCo, `mujoco-python-viewer`, Matplotlib). Требуется Python ≥ 3.10.
+- `.venv/` — опциональное локальное виртуальное окружение Python.
+
+
+**Развёртывание (через uv)**
+- Требуется Python 3.10+ и установленный `uv` (например, `pipx install uv` или из официальной инструкции astral).
+- Рекомендуемый способ (использует `uv.lock`):
+  - `uv sync` — создаст `.venv` и установит зависимости, зафиксированные в lock-файле.
+  - `source .venv/bin/activate` (Windows: `.\\.venv\\Scripts\\activate`).
+- Альтернатива вручную:
+  - `uv venv && source .venv/bin/activate`
+  - `uv pip install -e .`
+- Пакет `mujoco` (3.x) ставится через uv/pip и включает сам движок. На Linux/macOS убедитесь, что доступны системные зависимости OpenGL/GLFW для отрисовки окна.
+
+
+**Как Запускать**
+- После `uv sync` активируйте окружение и запускайте:
+  - PID: `python Script/segway_pid.py`
+  - LQR: `python Script/segway_lqr.py`
+- Либо без активации: `uv run python Script/segway_pid.py` / `uv run python Script/segway_lqr.py`.
+- Закройте окно вьюера, чтобы остановить симуляцию. По завершении в `logs/` появятся файлы вида `segway_*.csv/.png` или `segway_lqr_*.csv/.png`.
+- Основные параметры (начальный наклон, лимиты, коэффициенты) задаются в начале скриптов: `Script/segway_pid.py:11` и `Script/segway_lqr.py:11`.
+
+
+**Модель MuJoCo (`Mujoco/segway.xml:1`)**
+- Существенные элементы:
+  - `joint` `chassis_x` — поступательное движение платформы по оси X.
+  - `joint` `torso_pitch` — шарнир тангажа вокруг оси Y (угол θ).
+  - `joint` `left_wheel_hinge` / `right_wheel_hinge` — вращение колёс вокруг оси Y.
+  - `actuator` `left_motor`/`right_motor` — моментные моторы с ограничением `ctrlrange="-2.5 2.5"` (см. `U_MAX` в скриптах).
+  - `sensor` `gyro`, `accelerometer` на «IMU» для возможной фильтрации.
+- Таймстеп и интегратор заданы в `<option>`; по умолчанию `timestep=0.001`, `RK4`.
+
+
+**segway_pid.py — устройство и математика**
+- Загрузка модели и начальной позы:
+  - Путь к XML: `Script/segway_pid.py:14` (`XML_NAME = "segway.xml"`).
+  - Начальный наклон: `INIT_PITCH_DEG` (по Y, в градусах).
+  - Состояние из сочленений: `x, \dot x, θ, \dot θ` по `chassis_x` и `torso_pitch`.
+- Автокалибровка знака моторов (`AUTO_MOTOR_CALIBRATE`): кратковременно задаётся малый одинаковый момент колёсам с `sign=±1`; выбирается знак, который уменьшает модуль отклонения, задавая `MOTOR_SIGN`.
+- Два контура:
+  - Внешний PID по положению X → ссылка на угол θ_ref (в радианах):
+    - Формула: `θ_ref = -(Kp_x * x + Ki_x * ∫x dt + Kd_x * \dot x)`, затем ограничение `|θ_ref| ≤ THETA_REF_LIMIT`.
+    - Интегратор по X обновляется только при умеренных углах (например `|θ| < 0.6`), чтобы избежать интегрального разгона при падении.
+  - Внутренний PID по углу: ошибка `e_θ = θ - θ_ref` → управляющий момент u:
+    - Формула: `u_cmd = -(Kp_θ * e_θ + Ki_θ * ∫e_θ dt + Kd_θ * \dot θ_f)`.
+    - `\dot θ_f` — сглаженная скорость (однополюсный НЧ-фильтр, константа `RATE_TAU`).
+    - Доп. сглаживание команды (`u_f`) с константой `U_TAU` перед насыщением.
+    - Насыщение: `u = clip(u_f, -U_MAX, U_MAX)` с простым anti-windup: при насыщении и совпадении знаков ошибки и управления интеграторы чуть «подпускаются».
+- Применение момента: одинаково на оба колеса `u_applied = MOTOR_SIGN * u`.
+- Логирование: время, состояние, интеграторы, команды и насыщение; сохраняются CSV/PNG.
+- Точки входа: `main()` (`Script/segway_pid.py:151`), завершение — `if __name__ == "__main__":` (`Script/segway_pid.py:303`).
+
+
+**segway_lqr.py — устройство и математика**
+- Состояние: `z = [x, \dot x, θ, \dot θ]`. Управление: общий момент колёс `u` (одинаковый слева/справа).
+- Дискретизация управления: управление держится постоянным `CONTROL_DECIMATE` шагов интегратора MuJoCo: `T_s = CONTROL_DECIMATE * dt`.
+- Численная линеаризация около равновесия `z=0, u=0` (вертикаль):
+  - Вспомогательная функция `step_map(z, u)` продвигает динамику на `T_s` вперёд через MuJoCo.
+  - Матрицы получаются центральными разностями:
+    - `A[:, i] ≈ (f(z + ε_i, 0) - f(z - ε_i, 0)) / (2 ε_i)`;
+    - `B ≈ (f(0, +ε_u) - f(0, -ε_u)) / (2 ε_u)`.
+- LQR: минимизация `∑ (zᵀ Q z + uᵀ R u)` для дискретной системы `z_{k+1} = A z_k + B u_k`.
+  - Решение DARE итерациями Риккати, затем `K = (R + Bᵀ P B)^{-1} Bᵀ P A`.
+  - Управление: `u = -K z` с насыщением `|u| ≤ U_MAX`.
+- Практика исполнения:
+  - Автокалибровка `MOTOR_SIGN` аналогична PID.
+  - Обновление `u` каждые `CONTROL_DECIMATE` шагов, между обновлениями держим `u` постоянным (Zero-Order Hold).
+  - Логирование и графики аналогичны PID.
+- Точки входа: `main()` (`Script/segway_lqr.py:171`), завершение — `if __name__ == "__main__":` (`Script/segway_lqr.py:356`).
+
+
+**Где что настраивать**
+- Лимит момента: `U_MAX` в обоих скриптах — должен соответствовать `ctrlrange` в `Mujoco/segway.xml:1`.
+- Начальный наклон: `INIT_PITCH_DEG`.
+- Знаки и автокалибровка: `ANGLE_SIGN`, `MOTOR_SIGN`, `AUTO_MOTOR_CALIBRATE`.
+- PID: `KP_X, KI_X, KD_X, THETA_REF_LIMIT`, `KP_THETA, KI_THETA, KD_THETA`, `RATE_TAU`, `U_TAU`.
+- LQR: веса `Q`, `R`, шаг удержания `CONTROL_DECIMATE`, точности разностей `EPS_*`.
+
+
+**Подсказки по эксплуатации**
+- Если система «падает», начните с меньшего начального наклона (`INIT_PITCH_DEG`) и/или уменьшите `U_MAX` для мягкости.
+- При тюнинге PID полезно сначала добиться устойчивого баланса по углу (фикс. `θ_ref=0`), затем подключать внешний контур по X.
+- Для LQR смещение весов `Q` по `θ`/`\dot θ` обычно самый чувствительный к стабильности параметр.
