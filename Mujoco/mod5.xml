@@ -4,12 +4,20 @@
     <compiler angle="degree"/>
     <option timestep="0.001" integrator="RK4" density="1.2" gravity="0 0 -9.81"/>
 
+    <default>
+        <!-- Overdamped, soft contact with small margin to avoid chatter -->
+        <geom solimp="0.9 0.95 0.001 0.5 2" solref="0.02 2" margin="0.001"/>
+    </default>
+
     <worldbody>
         <light name="top" pos="0 0 3" dir="0 0 -1" directional="true"/>
         <geom name="floor" type="plane" size="10 10 0.1" rgba="0.8 0.9 0.8 1" friction="1.0 0.005 0.0001"/>
 
-        <body name="base" pos="0 0 0.14">
-            <freejoint name="base_joint"/>
+        <body name="base" pos="0 0 0.12">
+            <!-- Lock vertical translation: ball orientation + x,y slides -->
+            <joint name="base_orient" type="ball"/>
+            <joint name="base_x" type="slide" axis="1 0 0"/>
+            <joint name="base_y" type="slide" axis="0 1 0"/>
 
             <!-- Body dimensions: half-size = 0.03, 0.05, 0.10 -->
             <geom name="torso" type="box" size="0.03 0.05 0.10"
@@ -24,22 +32,39 @@
           
             <body name="left_wheel" pos="0 0.065 -0.08">
                 <inertial pos="0 0 0" euler="90 0 0" mass="0.25" diaginertia="0.00020 0.00012 0.00012"/>
-                <joint name="left_hinge" type="hinge" pos="0 0 0" axis="0 1 0" actuatorfrcrange="-5 5" damping="0.15"/>
-                <geom name="left_wheel_geom" type="cylinder" size="0.04 0.01" euler="90 0 0" rgba="0.25 0.25 0.25 1"/>
+                <joint name="left_hinge" type="hinge" pos="0 0 0" axis="0 1 0" actuatorfrcrange="-5 5" damping="0.3"/>
+                <geom name="left_wheel_geom" type="cylinder" size="0.04 0.01" euler="90 0 0" rgba="0.25 0.25 0.25 1" contype="0"/>
+                <site name="left_center" pos="0 0 0" size="0.002"/>
             </body>
 
             <body name="right_wheel" pos="0 -0.065 -0.08">
                 <inertial pos="0 0 0" euler="90 0 0" mass="0.25" diaginertia="0.00020 0.00012 0.00012"/>
-                <joint name="right_hinge" type="hinge" pos="0 0 0" axis="0 1 0" actuatorfrcrange="-5 5" damping="0.15"/>
-                <geom name="right_wheel_geom" type="cylinder" size="0.04 0.01" euler="90 0 0" rgba="0.25 0.25 0.25 1"/>
+                <joint name="right_hinge" type="hinge" pos="0 0 0" axis="0 1 0" actuatorfrcrange="-5 5" damping="0.3"/>
+                <geom name="right_wheel_geom" type="cylinder" size="0.04 0.01" euler="90 0 0" rgba="0.25 0.25 0.25 1" contype="0"/>
+                <site name="right_center" pos="0 0 0" size="0.002"/>
             </body>
+        </body>
+
+        <!-- Anchors that constrain wheel centers to z=radius with XY slides -->
+        <body name="left_anchor" pos="0 0 0">
+            <joint name="left_anchor_x" type="slide" axis="1 0 0"/>
+            <joint name="left_anchor_y" type="slide" axis="0 1 0"/>
+            <inertial pos="0 0 0" mass="0.01" diaginertia="1e-5 1e-5 1e-5"/>
+            <site name="left_anchor_site" pos="0 0 0.04" size="0.002"/>
+        </body>
+
+        <body name="right_anchor" pos="0 0 0">
+            <joint name="right_anchor_x" type="slide" axis="1 0 0"/>
+            <joint name="right_anchor_y" type="slide" axis="0 1 0"/>
+            <inertial pos="0 0 0" mass="0.01" diaginertia="1e-5 1e-5 1e-5"/>
+            <site name="right_anchor_site" pos="0 0 0.04" size="0.002"/>
         </body>
     </worldbody>
 
     <actuator>
         <!-- Use velocity actuators for stability -->
-        <velocity name="left_motor" joint="left_hinge" kv="0.9" gear="1"/>
-        <velocity name="right_motor" joint="right_hinge" kv="0.9" gear="1"/>
+        <velocity name="left_motor" joint="left_hinge" kv="0.8" gear="1" forcerange="-2 2"/>
+        <velocity name="right_motor" joint="right_hinge" kv="0.8" gear="1" forcerange="-2 2"/>
     </actuator>
 
     <sensor>
@@ -47,9 +72,9 @@
         <accelerometer name="acc" site="imu"/>
     </sensor>
 
-    <contact>
-        <pair geom1="floor" geom2="left_wheel_geom"  friction="0.4 0.4 0.07 0.001 0.001"/>
-        <pair geom1="floor" geom2="right_wheel_geom" friction="0.4 0.4 0.07 0.001 0.001"/>
-    </contact>
+    <equality>
+        <connect name="left_center_on_plane" site1="left_center" site2="left_anchor_site"/>
+        <connect name="right_center_on_plane" site1="right_center" site2="right_anchor_site"/>
+    </equality>
 
 </mujoco>

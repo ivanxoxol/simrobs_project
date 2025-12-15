@@ -57,9 +57,10 @@ def get_pitch_from_imu(data):
     pitch_rate = gyro_y
 
     ax = data.sensordata[acc_adr + 0]
+    ay = data.sensordata[acc_adr + 1]
     az = data.sensordata[acc_adr + 2]
-    # theta ≈ -atan2(ax, az) for pitch about Y
-    pitch_acc = np.arctan2(-ax, az)
+    # Robust pitch from accelerometer: atan2(-ax, sqrt(ay^2 + az^2))
+    pitch_acc = np.arctan2(-ax, np.sqrt(ay * ay + az * az))
 
     pitch_gyro = pitch_est + pitch_rate * dt
     pitch_est = alpha * pitch_gyro + (1 - alpha) * pitch_acc
