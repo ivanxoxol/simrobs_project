@@ -1,5 +1,6 @@
+import os
 import mujoco
-import mujoco.viewer
+import mujoco_viewer
 import numpy as np
 from scipy.spatial.transform import Rotation
 
@@ -28,30 +29,29 @@ LQR_K = np.array([-2.14, -0.035, 0.0, 2.236])
 # -------------------------------------------------------------------------
 
 def get_pitch(model, data):
-    """Return pitch angle (forward tilt) from freejoint quaternion."""
+    """Return pitch angle (forward tilt about Y) from freejoint quaternion."""
+    # base body has freejoint in mod5.xml
     quat = data.body("base").xquat
     if quat[0] == 0:
-        return 0
-    rotation = Rotation.from_quat([quat[1], quat[2], quat[3], quat[0]])
+        return 0.0
+    rotation = Rotation.from_quat([quat[1], quat[2], quat[3], quat[0]])  # [x,y,z,w]
     angles = rotation.as_euler("xyz", degrees=False)
-    #print(angles[0])
-    return angles[0]
+    # Pitch is rotation around Y for this model
+    return angles[1]
 
 
 def get_pitch_dot(model, data):
-    """Return angular velocity around X axis from freejoint qvel."""
+    """Return angular velocity around Y from freejoint qvel."""
     angular = data.joint("base_joint").qvel[-3:]
-    #print(angular[0])
-    return angular[0]
+    return angular[1]
 
 
 def get_wheel_velocity(model, data):
-    """Return average forward linear speed from wheel hinge velocities."""
-    wl = data.joint("left_hinge").qvel[0]
-    wr = data.joint("right_hinge").qvel[0]
-    w = (wl + wr) * 0.5
-    #print(w)
-    return w
+    """Return average forward angular speed of wheels (rad/s)."""
+    wl = float(data.joint("left_hinge").qvel[0])
+    wr = float(data.joint("right_hinge").qvel[0])
+    # In this model both hinges share the same axis; average is fine
+    return 0.5 * (wl + wr)
 
 
 # -------------------------------------------------------------------------
@@ -103,8 +103,15 @@ def apply_control(model, data):
     else:
         u = lqr_control(model, data)
 
-    data.actuator("left_motor").ctrl = [u]
-    data.actuator("right_motor").ctrl = [u]
+    # Velocity actuators: target angular speed (rad/s)
+    # Add a reasonable saturation for stability
+    MAX_SPEED = 200.0
+    u = float(np.clip(u, -MAX_SPEED, MAX_SPEED))
+
+    left_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, "left_motor")
+    right_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, "right_motor")
+    data.ctrl[left_id] = u
+    data.ctrl[right_id] = u
 
 
 # -------------------------------------------------------------------------
@@ -119,17 +126,37 @@ def run_simulation(xml_path):
 
     dt = model.opt.timestep
 
-    # Start balanced upright
-    data.qpos[:] = 0
+    # Start balanced upright, place wheels on ground
+    if model.jnt_type[0] == mujoco.mjtJoint.mjJNT_FREE:
+        lw_body = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "left_wheel")
+        lw_geom = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "left_wheel_geom")
+        if lw_body >= 0 and lw_geom >= 0:
+            wheel_r = float(model.geom_size[lw_geom, 0])
+            lw_local_z = float(model.body_pos[lw_body, 2])
+            z0 = wheel_r - lw_local_z
+        else:
+            z0 = 0.12
+        data.qpos[:7] = np.array([0.0, 0.0, z0, 1.0, 0.0, 0.0, 0.0], dtype=float)
+    else:
+        data.qpos[:] = 0
     data.qvel[:] = 0
     mujoco.mj_forward(model, data)
+    for _ in range(200):
+        mujoco.mj_step(model, data)
 
-    with mujoco.viewer.launch_passive(model, data) as viewer:
-        while viewer.is_running():
+    viewer = mujoco_viewer.MujocoViewer(model, data, title="mod5 PID/LQR")
+    try:
+        while True:
+            alive_attr = getattr(viewer, "is_alive")
+            alive = alive_attr if isinstance(alive_attr, bool) else alive_attr()
+            if not alive:
+                break
+
             apply_control(model, data)
-
             mujoco.mj_step(model, data)
-            viewer.sync()
+            viewer.render()
+    finally:
+        viewer.close()
 
 
 # -------------------------------------------------------------------------
@@ -137,4 +164,7 @@ def run_simulation(xml_path):
 # -------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    run_simulation("Mujoco\\mod5.xml")
+    here = os.path.dirname(os.path.abspath(__file__))
+    xml_path = os.path.join(here, "..", "Mujoco", "mod5.xml")
+    xml_path = os.path.normpath(xml_path)
+    run_simulation(xml_path)
