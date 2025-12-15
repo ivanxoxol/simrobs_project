@@ -1,4 +1,5 @@
 import os
+import math
 import mujoco
 import mujoco_viewer
 import numpy as np
@@ -102,6 +103,8 @@ def calculate_pid(pitch):
     return Kp * error + Kd * derivative_error + Ki * integral_error
 
 
+INIT_PITCH_DEG = 3.0  # initial forward tilt (degrees)
+
 def place_robot_on_ground(model, data):
     if model.jnt_type[0] != mujoco.mjtJoint.mjJNT_FREE:
         return
@@ -113,13 +116,16 @@ def place_robot_on_ground(model, data):
         z0 = wheel_r - lw_local_z
     else:
         z0 = 0.12
-    data.qpos[:7] = np.array([0.0, 0.0, z0, 1.0, 0.0, 0.0, 0.0], dtype=float)
+    th = math.radians(INIT_PITCH_DEG)
+    qw = math.cos(th * 0.5)
+    qy = math.sin(th * 0.5)
+    data.qpos[:7] = np.array([0.0, 0.0, z0, qw, 0.0, qy, 0.0], dtype=float)
     data.qvel[:] = 0.0
     mujoco.mj_forward(model, data)
 
 # Place and settle
 place_robot_on_ground(model, data)
-for _ in range(200):
+for _ in range(5):
     mujoco.mj_step(model, data)
 
 # ---------- Real-time simulation loop ---------- 

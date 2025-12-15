@@ -1,4 +1,5 @@
 import os
+import math
 import mujoco
 import mujoco_viewer
 import numpy as np
@@ -136,12 +137,17 @@ def run_simulation(xml_path):
             z0 = wheel_r - lw_local_z
         else:
             z0 = 0.12
-        data.qpos[:7] = np.array([0.0, 0.0, z0, 1.0, 0.0, 0.0, 0.0], dtype=float)
+        # small initial pitch (Y)
+        INIT_PITCH_DEG = 3.0
+        th = math.radians(INIT_PITCH_DEG)
+        qw = math.cos(th * 0.5)
+        qy = math.sin(th * 0.5)
+        data.qpos[:7] = np.array([0.0, 0.0, z0, qw, 0.0, qy, 0.0], dtype=float)
     else:
         data.qpos[:] = 0
     data.qvel[:] = 0
     mujoco.mj_forward(model, data)
-    for _ in range(200):
+    for _ in range(5):
         mujoco.mj_step(model, data)
 
     viewer = mujoco_viewer.MujocoViewer(model, data, title="mod5 PID/LQR")
