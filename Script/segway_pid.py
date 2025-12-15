@@ -10,8 +10,8 @@ import mujoco_viewer
 # Config (tweak as needed)
 # -----------------------------
 
-INIT_PITCH_DEG = 45.0        # initial tilt (deg); set 0.0 to start upright
-MAX_SPEED = 6.0             # wheel command saturation (rad/s) for velocity actuators
+INIT_PITCH_DEG = 20.0        # initial tilt (deg); set 0.0 to start upright
+MAX_SPEED = 6.0               # wheel command saturation (rad/s) for velocity actuators
 
 # PID gains for pitch stabilization (target pitch = 0)
 # Note on tuning:
@@ -146,9 +146,10 @@ def main():
     # First-order smoothing for commanded speed (kept modest to avoid phase lag)
     u_filt = 0.0
     TAU_U = 0.04  # s, speed command smoothing time constant (was 0.15)
-    RAMP_TAU = 0.6  # s, soft start for applied speed
-    # Rate limiter for wheel speed command (rad/s per step)
-    DU_MAX = 0.03   # was 0.01; reduce choking to avoid limit-cycle from severe rate-limiting
+    RAMP_TAU = 0.6  # s, soft start baseline for applied speed
+    # Rate limiter for wheel speed command (rad/s per step). We will scale this with error below.
+    DU_MAX_BASE = 0.03   # per-step limit near upright (keeps noise down)
+    DU_MAX_STRONG = 0.25 # per-step limit when far from upright (allow strong catch)
     u_prev = 0.0
     sat_prev = False
 
@@ -207,14 +208,23 @@ def main():
 
                 error = pitch
                 # Form PID using current integrator (update integrator AFTER saturation handling)
-                u_cmd = KP * error - KD * rate_filt + KI * integ
+                # Keep PD always active; gate integral when far from upright to avoid big windup
+                KI_eff = KI if abs(error) < 0.35 else 0.0
+                u_cmd = KP * error - KD * rate_filt + KI_eff * integ
 
                 alpha = dt / (TAU_U + dt)
                 u_smooth = u_filt + alpha * (u_cmd - u_filt)
                 u_filt = u_smooth
 
-                ramp = 1.0 - math.exp(-data.time / RAMP_TAU)
+                # Dynamic soft-start: disable ramp once the robot is noticeably tilted
+                if abs(error) > 0.20:
+                    ramp = 1.0
+                else:
+                    ramp = 1.0 - math.exp(-data.time / RAMP_TAU)
                 u_target = u_smooth * ramp
+
+                # Dynamic rate limit: allow much faster changes when far from upright
+                DU_MAX = DU_MAX_STRONG if abs(error) > 0.30 else DU_MAX_BASE
                 du = u_target - u_prev
                 if du > DU_MAX:
                     du = DU_MAX
@@ -229,7 +239,7 @@ def main():
 
                 # Simple anti-windup: only integrate when not saturated,
                 # or when error tends to move controller output away from saturation.
-                if KI != 0.0:
+                if KI_eff != 0.0:
                     allow_integ = (saturated == 0) or (u_rl * error < 0.0)
                     if allow_integ:
                         integ += error * dt
