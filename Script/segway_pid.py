@@ -10,13 +10,16 @@ import mujoco_viewer
 # Config (tweak as needed)
 # -----------------------------
 
-INIT_PITCH_DEG = 3.0        # initial tilt (deg); set 0.0 to start upright
+INIT_PITCH_DEG = 45.0        # initial tilt (deg); set 0.0 to start upright
 MAX_SPEED = 6.0             # wheel command saturation (rad/s) for velocity actuators
 
 # PID gains for pitch stabilization (target pitch = 0)
-KP = 12.0
-KD = 4.0
-KI = 0.0
+# Note on tuning:
+# - Excessive command smoothing and rate limiting add phase lag and can induce oscillations.
+#   Keep KD modestly high and reduce output filtering to maintain phase margin.
+KP = 0.5
+KD = 1.5
+KI = 1.0
 I_LIMIT = 1.0
 
 # If pitch sign appears inverted, flip ANGLE_SIGN
@@ -137,13 +140,17 @@ def main():
 
     # PID state
     integ = 0.0
-    # First-order smoothing for commanded speed (helps contact + velocity actuators)
+    # Derivative low-pass on gyro (reduce noise and phase lag vs. output filtering)
+    RATE_TAU = 0.03  # s, first-order LP for pitch_rate
+    rate_filt = 0.0
+    # First-order smoothing for commanded speed (kept modest to avoid phase lag)
     u_filt = 0.0
-    TAU_U = 0.15  # s, speed command smoothing time constant
+    TAU_U = 0.04  # s, speed command smoothing time constant (was 0.15)
     RAMP_TAU = 0.6  # s, soft start for applied speed
     # Rate limiter for wheel speed command (rad/s per step)
-    DU_MAX = 0.01
+    DU_MAX = 0.03   # was 0.01; reduce choking to avoid limit-cycle from severe rate-limiting
     u_prev = 0.0
+    sat_prev = False
 
     # Pre-resolve wheel joint dof for logging
     j_left = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "left_hinge")
@@ -155,7 +162,7 @@ def main():
     here = os.path.dirname(os.path.abspath(__file__))
     csv_path = os.path.join(here, "segway_timeseries.csv")
     png_path = os.path.join(here, "segway_timeseries.png")
-    CSV_IMMEDIATE = True
+    CSV_IMMEDIATE = False
     csv_file = None
     csv_writer = None
     if CSV_IMMEDIATE:
@@ -180,6 +187,7 @@ def main():
 
     # Viewer
     viewer = mujoco_viewer.MujocoViewer(model, data, title="Segway PID (mod5)")
+    STEPS_PER_RENDER = 10
     try:
         step = 0
         while True:
@@ -187,80 +195,80 @@ def main():
             alive = alive_attr if isinstance(alive_attr, bool) else alive_attr()
             if not alive:
                 break
+            for _ in range(STEPS_PER_RENDER):
+                # Measure state
+                pitch = ANGLE_SIGN * get_pitch_from_quat(model, data)
+                pitch_rate = ANGLE_SIGN * get_pitch_rate_from_gyro(model, data)
 
-            # Measure state
-            pitch = ANGLE_SIGN * get_pitch_from_quat(model, data)
-            pitch_rate = ANGLE_SIGN * get_pitch_rate_from_gyro(model, data)
+                # PID around zero (drive into lean): u = Kp*pitch - Kd*rate + Ki*∫error
+                # Low-pass filter gyro to stabilize D-term
+                alpha_rate = dt / (RATE_TAU + dt)
+                rate_filt = rate_filt + alpha_rate * (pitch_rate - rate_filt)
 
-            # PID around zero (drive into lean): u = Kp*pitch - Kd*pitch_rate
-            error = pitch
-            integ += error * dt
-            # anti-windup
-            if integ > I_LIMIT:
-                integ = I_LIMIT
-            elif integ < -I_LIMIT:
-                integ = -I_LIMIT
+                error = pitch
+                # Form PID using current integrator (update integrator AFTER saturation handling)
+                u_cmd = KP * error - KD * rate_filt + KI * integ
 
-            u_cmd = KP * error - KD * pitch_rate + KI * integ
+                alpha = dt / (TAU_U + dt)
+                u_smooth = u_filt + alpha * (u_cmd - u_filt)
+                u_filt = u_smooth
 
-            # Smooth command to avoid instant large steps on velocity actuators
-            alpha = dt / (TAU_U + dt)
-            u_smooth = u_filt + alpha * (u_cmd - u_filt)
-            u_filt = u_smooth
+                ramp = 1.0 - math.exp(-data.time / RAMP_TAU)
+                u_target = u_smooth * ramp
+                du = u_target - u_prev
+                if du > DU_MAX:
+                    du = DU_MAX
+                elif du < -DU_MAX:
+                    du = -DU_MAX
+                u_rl = u_prev + du
+                u_prev = u_rl
+                u_sat = float(np.clip(u_rl, -MAX_SPEED, MAX_SPEED))
+                if np.isfinite(ctrl_min):
+                    u_sat = float(np.clip(u_sat, ctrl_min, ctrl_max))
+                saturated = 1 if abs(u_sat - u_rl) > 1e-9 else 0
 
-            # Soft start ramp and rate limiting
-            ramp = 1.0 - math.exp(-data.time / RAMP_TAU)
-            u_target = u_smooth * ramp
-            # Rate limit per simulation step
-            du = u_target - u_prev
-            if du > DU_MAX:
-                du = DU_MAX
-            elif du < -DU_MAX:
-                du = -DU_MAX
-            u_rl = u_prev + du
-            u_prev = u_rl
-            # Final saturation
-            u_sat = float(np.clip(u_rl, -MAX_SPEED, MAX_SPEED))
-            if np.isfinite(ctrl_min):
-                u_sat = float(np.clip(u_sat, ctrl_min, ctrl_max))
-            saturated = 1 if abs(u_sat - u_cmd) > 1e-9 else 0
+                # Simple anti-windup: only integrate when not saturated,
+                # or when error tends to move controller output away from saturation.
+                if KI != 0.0:
+                    allow_integ = (saturated == 0) or (u_rl * error < 0.0)
+                    if allow_integ:
+                        integ += error * dt
+                        integ = max(min(integ, I_LIMIT), -I_LIMIT)
+                # If integral gain is zero (default), keep integ at 0 without updating.
 
-            # Apply to both wheels equally
-            # Apply calibrated motor sign to match world forward
-            u_applied = MOTOR_SIGN * u_sat
-            data.ctrl[left_motor] = u_applied
-            data.ctrl[right_motor] = u_applied
+                u_applied = MOTOR_SIGN * u_sat
+                data.ctrl[left_motor] = u_applied
+                data.ctrl[right_motor] = u_applied
 
-            # Integrate
-            mujoco.mj_step(model, data)
+                mujoco.mj_step(model, data)
+
+                # Debug and log (decimated)
+                step += 1
+                if step % LOG_DECIMATE == 0:
+                    t = float(data.time)
+                    wl = float(data.qvel[dof_left]) if dof_left is not None else 0.0
+                    wr = float(data.qvel[dof_right]) if dof_right is not None else 0.0
+                    times.append(t)
+                    pitch_log.append(float(pitch))
+                    rate_log.append(float(pitch_rate))
+                    u_log.append(float(u_cmd))
+                    u_left_log.append(float(u_applied))
+                    u_right_log.append(float(u_applied))
+                    wl_log.append(wl)
+                    wr_log.append(wr)
+                    sat_log.append(int(saturated))
+
+                    if csv_writer is not None:
+                        try:
+                            csv_writer.writerow([t, float(pitch), float(pitch_rate), float(u_cmd), float(u_applied), float(u_applied), wl, wr, saturated])
+                            csv_file.flush()
+                        except Exception as e:
+                            print(f"CSV write failed: {e}")
+
+                if step % int(max(1, 0.1 / dt)) == 0:
+                    print(f"t={data.time:.2f}  pitch={pitch:+.3f} rad  rate={pitch_rate:+.3f}  u={u_applied:+.2f}")
+
             viewer.render()
-
-            # Debug every ~0.1 s
-            step += 1
-            if step % int(max(1, 0.1 / dt)) == 0:
-                print(f"t={data.time:.2f}  pitch={pitch:+.3f} rad  rate={pitch_rate:+.3f}  u={u_applied:+.2f}")
-
-            # Log (decimated)
-            if step % LOG_DECIMATE == 0:
-                t = float(data.time)
-                wl = float(data.qvel[dof_left]) if dof_left is not None else 0.0
-                wr = float(data.qvel[dof_right]) if dof_right is not None else 0.0
-                times.append(t)
-                pitch_log.append(float(pitch))
-                rate_log.append(float(pitch_rate))
-                u_log.append(float(u_cmd))
-                u_left_log.append(float(u_applied))
-                u_right_log.append(float(u_applied))
-                wl_log.append(wl)
-                wr_log.append(wr)
-                sat_log.append(int(saturated))
-
-                if csv_writer is not None:
-                    try:
-                        csv_writer.writerow([t, float(pitch), float(pitch_rate), float(u_cmd), float(u_applied), float(u_applied), wl, wr, saturated])
-                        csv_file.flush()
-                    except Exception as e:
-                        print(f"CSV write failed: {e}")
     finally:
         viewer.close()
 
@@ -304,6 +312,22 @@ def main():
             print(f"Saved data: {csv_path}")
         except Exception as e:
             print(f"Plotting failed: {e}")
+        if not CSV_IMMEDIATE:
+            try:
+                import numpy as _np
+                arr = _np.column_stack([
+                    times, pitch_log, rate_log, u_log, u_left_log, u_right_log, wl_log, wr_log, sat_log
+                ])
+                _np.savetxt(
+                    csv_path,
+                    arr,
+                    delimiter=",",
+                    header="time,pitch,pitch_rate,u,u_left,u_right,wl,wr,sat",
+                    comments="",
+                )
+                print(f"CSV saved: {csv_path}")
+            except Exception as e:
+                print(f"CSV save failed: {e}")
 
 
 if __name__ == "__main__":
